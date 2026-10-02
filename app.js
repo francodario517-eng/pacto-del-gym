@@ -57,9 +57,12 @@
     const r = S.cfgRow || {}, g = S.gymRow || {};
     return { name: r.gym_name || '', lat: g.lat, lng: g.lng, radius: r.gym_radius_m || 200, set: !!r.gym_set,
              source: g.source || null, learnedAt: g.learned_at || null,
-             verify: r.verify_m || 25, learnDays: r.learn_days || 3, learnPeople: r.learn_people || 2 };
+             verify: r.verify_m || 50 };
   };
-  const ctx = () => ({ att: S.att, exc: S.exc });
+  // Para la lógica, una marca "fuera" (no fue en el gym) es como si no hubiera marcado:
+  // cuenta como falta hasta que el organizador la apruebe.
+  const attCounts = { has: k => S.att.has(k) && S.vst.get(k) !== 'fuera' };
+  const ctx = () => ({ att: attCounts, exc: S.exc });
   const me = () => S.members.find(m => m.id === S.myId) || null;
   const vstOf = (mid, d) => S.vst.get(mid + '~' + d) || null;
   const paidOf = (mid, ym) => { const p = S.pay.get(mid + '~' + ym); return p ? p.amount : 0; };
@@ -124,7 +127,7 @@
     gym: async () => {
       // Para quien no es admin la regla de la base devuelve vacío: no es un error.
       let { data, error } = await sb.from('gym').select('lat,lng,source,learned_at').eq('id', 1).maybeSingle();
-      // Base todavía sin las columnas del aprendizaje (falta volver a correr el schema): se lee lo básico.
+      // Base todavía sin las columnas nuevas (falta volver a correr el schema): se lee lo básico.
       if (error && /source|learned_at|column/i.test(error.message || '')) ({ data, error } = await sb.from('gym').select('lat,lng').eq('id', 1).maybeSingle());
       if (error) throw error;
       S.gymRow = data;
@@ -142,10 +145,11 @@
       try { S.loc = new Map((await fetchAll('checkin_locations', 'member,day,lat,lng,accuracy_m')).map(r => [r.member + '~' + r.day, r])); }
       catch (e) { S.loc = new Map(); }
     },
-    // Estado de cada marca (ok / revisar / aprendiendo / manual). Lo calcula la base sin mostrar coordenadas.
+    // Estado de cada marca (ok / analizando / fuera / manual). Lo calcula la base sin mostrar coordenadas.
     status: async () => {
       try {
-        const { data, error } = await sb.rpc('checkin_status', { p_from: '2000-01-01', p_to: today() });
+        // La base sólo analiza los últimos 60 días; lo anterior se pide igual para los meses viejos.
+        const { data, error } = await sb.rpc('checkin_status', { p_from: L.addDays(today(), -400), p_to: today() });
         if (error) throw error;
         S.vst = new Map((data || []).map(r => [r.member + '~' + r.day, r.status]));
       } catch (e) { S.vst = new Map(); }   // función todavía no creada: el tablero sigue andando
@@ -301,7 +305,14 @@
     const b = $('banner');
     let html = '';
     if (S.status === 'error') html = '<div class="banner"><b>No se pudo leer el reto.</b> Revisá la conexión y recargá la página.</div>';
-    else if (S.status === 'ready' && S.isAdmin && !gym().set) { const g = gym(); html = '<div class="banner"><b>Aprendiendo dónde queda el gym.</b> Se fija sola cuando ' + g.learnPeople + ' personas marquen al menos 2 días cada una desde el mismo lugar (a menos de ' + g.verify + ' m), con ' + g.learnDays + ' días distintos en total. Mientras tanto se marca desde cualquier lado. También la podés cargar en Ajustes.</div>'; }
+    else if (S.status === 'ready' && S.isAdmin) {
+      const ym = S.month; let an = 0, out = 0;
+      S.vst.forEach((v, k) => { if (k.slice(-10, -3) !== ym) return; if (v === 'analizando') an++; else if (v === 'fuera') out++; });
+      if (an || out) html = '<div class="banner"><b>Marcas para mirar este mes:</b> ' +
+        (an ? an + (an === 1 ? ' en análisis (?)' : ' en análisis (?)') : '') + (an && out ? ' y ' : '') +
+        (out ? out + (out === 1 ? ' que no fue en el gym (!), cuenta como falta' : ' que no fueron en el gym (!), cuentan como falta') : '') +
+        '. Tocá el día en el calendario para aprobarla o sacarla.</div>';
+    }
     b.innerHTML = html; b.hidden = !html;
   }
 
@@ -315,6 +326,9 @@
     const left = L.isYmd(m.left) && m.left < t;
     if (left) {
       html += '<button class="plate off" disabled><span class="small">Estás</span><span class="big">De baja</span></button>';
+    } else if (S.att.has(m.id + '~' + t) && vstOf(m.id, t) === 'fuera') {
+      html += '<button class="plate off" disabled><span class="small">Hoy</span><span class="big">En revisión</span><span class="small">cuenta como falta</span></button>' +
+        '<div class="note warn-note">Marcaste desde un lugar distinto al de siempre: cuenta como falta hasta que el organizador la apruebe.</div>';
     } else if (st === 'done' || st === 'extra') {
       const stamp = S.stampNext; S.stampNext = false;
       const rec = S.att.get(m.id + '~' + t);
@@ -322,8 +336,7 @@
         '<span class="small">Hoy</span><span class="big">Listo</span><span class="small">✓ ' + (rec && rec.at ? esc(hhmm(rec.at)) : 'marcado') + '</span></button>' +
         (rec && rec.by === S.myId ? '<button class="linkbtn" data-act="undo">Me equivoqué, desmarcar</button>' : '');
       const vs = vstOf(m.id, t);
-      if (vs === 'revisar') html += '<div class="note warn-note">Tu marca quedó <b>a revisar</b>: la hiciste lejos de donde marca el grupo. El organizador la aprueba o la saca.</div>';
-      else if (vs === 'aprendiendo') html += '<div class="note">Todavía se está aprendiendo dónde queda el gym. Tu marca cuenta, y cuando se fije el gym se vuelve a revisar.</div>';
+      if (vs === 'analizando') html += '<div class="note warn-note">Tus marcas están <b>en análisis</b>: marcaste desde más de un lugar. Con las próximas marcas se define cuál es tu gym; las de otro lugar van a contar como falta.</div>';
     } else if (st === 'excused') {
       html += '<button class="plate off" disabled><span class="small">Hoy</span><span class="big">Libre</span><span class="small">justificado</span></button>';
     } else if (S.checking) {
@@ -376,8 +389,8 @@
       if (r.st.counted > 0 && r.st.miss === 0) pill = '<span class="pill ok">Invicto</span>';
       else if (r.st.fine > 0 && owed === 0) pill = '<span class="pill paid">Multa pagada</span>';
       else if (r.st.miss > 0) pill = '<span class="pill bad">' + r.st.miss + (r.st.miss === 1 ? ' falta' : ' faltas') + '</span>';
-      const rev = r.st.days.filter(x => (x.s === 'done' || x.s === 'extra') && vstOf(r.m.id, x.d) === 'revisar').length;
-      if (rev) pill += '<span class="pill warn">' + rev + ' a revisar</span>';
+      const rev = r.st.days.filter(x => (x.s === 'done' || x.s === 'extra') && vstOf(r.m.id, x.d) === 'analizando').length;
+      if (rev) pill += '<span class="pill warn">' + rev + ' en análisis</span>';
       const strip = r.st.days.map(x => '<i class="s-' + x.s + '"></i>').join('');
       return '<li class="' + (r.pos === 1 && r.st.counted > 0 ? 'lead' : '') + '">' +
         '<span class="pos num">' + r.pos + '</span>' + avatar(r.m) +
@@ -446,12 +459,15 @@
     else wrap.scrollLeft = keep;
   }
 
-  // Una celda del calendario. Una marca hecha lejos de donde marca el grupo lleva "!".
+  // Una celda del calendario. "?" = en análisis (cuenta como que fue);
+  // "!" = marcó, pero no fue en el gym (cuenta como falta).
   function cellHtml(r, x, glyph, label) {
-    const flag = (x.s === 'done' || x.s === 'extra') && vstOf(r.m.id, x.d) === 'revisar';
-    return '<td><button class="cell s-' + x.s + (flag ? ' flag' : '') + '" data-act="cell" data-m="' + esc(r.m.id) + '" data-d="' + x.d + '"' +
-      (x.s === 'future' ? ' disabled' : '') + ' aria-label="' + esc(r.m.name + ', ' + dayLong(x.d) + ': ' + label[x.s] + (flag ? ', a revisar' : '')) + '">' +
-      (flag ? '!' : (glyph[x.s] || '')) + '</button></td>';
+    const k = r.m.id + '~' + x.d, vs = S.att.has(k) ? vstOf(r.m.id, x.d) : null;
+    const flag = (x.s === 'done' || x.s === 'extra') && vs === 'analizando';
+    const out = vs === 'fuera';
+    return '<td><button class="cell s-' + x.s + (flag ? ' flag' : '') + (out ? ' out' : '') + '" data-act="cell" data-m="' + esc(r.m.id) + '" data-d="' + x.d + '"' +
+      (x.s === 'future' ? ' disabled' : '') + ' aria-label="' + esc(r.m.name + ', ' + dayLong(x.d) + ': ' + (out ? 'marcó fuera del gym, cuenta como falta' : label[x.s] + (flag ? ', en análisis' : ''))) + '">' +
+      (out ? '!' : flag ? '?' : (glyph[x.s] || '')) + '</button></td>';
   }
 
   function drawFines(c, ym, ranked) {
@@ -513,19 +529,19 @@
     }
     const vs = S.att.has(key) ? vstOf(m.id, d) : null;
     const vsTxt = {
-      ok: 'Verificada: marcó en el gym.',
-      revisar: 'A revisar: marcó lejos de donde marca el grupo.',
-      aprendiendo: 'Sin verificar todavía: el sistema está aprendiendo dónde queda el gym.',
+      ok: 'Verificada: marcó desde su lugar de siempre.',
+      analizando: 'En análisis: marcó desde más de un lugar. Con sus próximas marcas se define cuál es su gym.',
+      fuera: 'No fue en el gym: marcó lejos de su lugar de siempre. Cuenta como falta (' + L.gs(c.fine) + ') hasta que la apruebes.',
       manual: 'Cargada por el organizador.'
     }[vs];
-    if (vsTxt) who += '<div class="sub' + (vs === 'revisar' ? ' warn-note' : '') + '">' + esc(vsTxt) + '</div>';
+    if (vsTxt) who += '<div class="sub' + (vs === 'analizando' || vs === 'fuera' ? ' warn-note' : '') + '">' + esc(vsTxt) + '</div>';
     const busy = S.busy.has(key) ? ' disabled' : '';
     let acts = '';
     if (S.isAdmin && d <= t) {
       const went = S.att.has(key), ex = S.exc.has(key);
       acts = '<div class="acts">' +
         (!went ? '<button class="btn primary" data-act="mark" data-k="went"' + busy + '>Fue</button>' : '') +
-        (vs === 'revisar' ? '<button class="btn primary" data-act="approve"' + busy + '>Aprobar</button>' : '') +
+        (vs === 'analizando' || vs === 'fuera' ? '<button class="btn primary" data-act="approve"' + busy + '>Aprobar</button>' : '') +
         (went || ex ? '<button class="btn danger" data-act="mark" data-k="miss"' + busy + '>Sacar la marca</button>' : '') +
         (!ex && st !== 'off' && st !== 'extra' ? '<button class="btn" data-act="mark" data-k="excused"' + busy + '>Justificar</button>' : '') +
         '</div>';
@@ -533,7 +549,7 @@
       acts = '<div class="sub">Cada uno marca su día desde el gym. Para corregir otro día, pedíselo al organizador.</div>';
     }
     $('dayBody').innerHTML = '<h3 tabindex="-1" autofocus>' + esc(m.name) + '</h3><div class="sub">' + esc(dayLong(d)) + '</div>' +
-      '<div>' + esc(txt) + '</div>' + who + acts +
+      (vs === 'fuera' ? '' : '<div>' + esc(txt) + '</div>') + who + acts +
       '<div class="foot"><button class="btn" data-act="close-day">Cerrar</button></div>';
   }
 
@@ -554,7 +570,7 @@
       '<div class="field"><span>Días que hay que ir</span><div class="wdays">' + order.map(n =>
         '<label title="' + WD_NAME[n] + '"><input type="checkbox" id="wd' + n + '" value="' + n + '"' + (c.weekdays.includes(n) ? ' checked' : '') + '>' + WD_LETTER[n] + '</label>').join('') + '</div></div>' +
       '<label class="field"><span>El reto empieza el</span><input type="date" id="cfgStart" value="' + c.start + '"></label>' +
-      '<div class="field"><span>Ubicación del gym</span>' +
+      '<div class="field"><span>Ubicación del gym (opcional)</span>' +
         '<input type="text" id="gymName" maxlength="60" placeholder="Nombre (opcional)" value="' + esc(g.name) + '">' +
         '<div class="gps-row">' +
           '<label class="field"><small>Latitud</small><input type="text" id="gymLat" inputmode="decimal" placeholder="-25.2867" value="' + (typeof g.lat === 'number' ? g.lat : '') + '"></label>' +
@@ -563,13 +579,11 @@
         '<input type="text" id="gymPaste" placeholder="O pegá un link de Google Maps" aria-label="Link de Google Maps o coordenadas">' +
         '<small>También sirve pegar «latitud, longitud». Estando en el gym podés tocar «Usar mi ubicación».</small>' +
         '<div class="acts"><button class="btn small" type="button" data-act="gym-here">Usar mi ubicación</button>' +
-          (g.set ? '<button class="btn small" type="button" data-act="relearn">Volver a aprender</button>' : '') + '</div>' +
-        '<small>' + (g.set ? (g.source === 'aprendida' ? 'Ubicación aprendida de las marcas del grupo.' : 'Ubicación cargada a mano.') : 'Todavía sin ubicación: se aprende de las marcas.') + '</small></div>' +
-      '<div class="field"><span>Verificación de las marcas</span><div class="gps-row">' +
-        '<label class="field"><small>OK a menos de (m)</small><input type="number" id="cfgVerify" min="5" max="500" step="5" value="' + g.verify + '"></label>' +
-        '<label class="field"><small>Días para aprender</small><input type="number" id="cfgLearnDays" min="1" max="30" value="' + g.learnDays + '"></label>' +
-        '<label class="field rad"><small>Personas</small><input type="number" id="cfgLearnPeople" min="1" max="20" value="' + g.learnPeople + '"></label></div>' +
-        '<small>Más lejos que eso del gym, la marca queda «a revisar». Adentro de un local el GPS puede errar 20 o 30 m: si marcas reales quedan a revisar, subilo a 40 o 50.</small></div>' +
+          '</div>' +
+        '<small>' + (g.set ? 'Cargada: cada marca se compara con esta ubicación y no hace falta el análisis por persona.' : 'Sin cargar: cada persona se compara con sus propias marcas.') + '</small></div>' +
+      '<div class="field"><span>Análisis de las marcas</span>' +
+        '<label class="field"><small>Perímetro (m)</small><input type="number" id="cfgVerify" min="5" max="500" step="5" value="' + g.verify + '"></label>' +
+        '<small>Marcas a menos de esa distancia son el mismo lugar. Si alguien marca desde más de un lugar, sus marcas quedan «en análisis» (?). Cuando un lugar junta 3 marcas y le saca 2 al otro, ese es su gym y las del otro lugar quedan «no fue en el gym» (!): cuentan como falta hasta que las apruebes.</small></div>' +
       '<div class="foot"><button class="btn primary" data-act="save-cfg">Guardar ajustes</button></div>' +
       '<div class="field"><span>Feriados y días que no cuentan</span><div class="hols">' +
         (c.holidays.length ? c.holidays.slice().sort().map(h => '<span class="pill">' + Number(h.slice(8)) + '/' + Number(h.slice(5, 7)) + '/' + h.slice(0, 4) +
@@ -608,6 +622,9 @@
   function keepInputs(fn) {
     const vals = {};
     const armed = [...$('setBody').querySelectorAll('[data-confirm="1"]')].map(x => ({ act: x.dataset.act, m: x.dataset.m, text: x.textContent }));
+    // Si alguien está escribiendo, el cursor vuelve al mismo campo y lugar (si no, se pierde lo que sigue).
+    const fe = document.activeElement, focusId = fe && fe.id && $('setBody').contains(fe) ? fe.id : null;
+    let sel = null; try { if (focusId && fe.selectionStart != null) sel = [fe.selectionStart, fe.selectionEnd]; } catch (e) { /* inputs sin selección (date, number) */ }
     $('setBody').querySelectorAll('input[id]').forEach(i => { vals[i.id] = i.type === 'checkbox' ? i.checked : i.value; });
     fn();
     for (const id in vals) {
@@ -617,6 +634,10 @@
     for (const a of armed) {
       const x = $('setBody').querySelector('[data-act="' + a.act + '"][data-m="' + a.m + '"]');
       if (x) { x.dataset.confirm = '1'; x.textContent = a.text; }
+    }
+    if (focusId && $(focusId)) {
+      const f = $(focusId); f.focus({ preventScroll: true });
+      if (sel) try { f.setSelectionRange(sel[0], sel[1]); } catch (e) { /* idem */ }
     }
   }
   // Si el servidor rechaza el cambio, el botón vuelve a quedar usable y desarmado.
@@ -667,17 +688,6 @@
       if (await run(sb.from('checkins').update({ approved: true }).eq('member', dayCtx.mid).eq('day', dayCtx.d), 'Marca aprobada.')) await reload(['checkins', 'status']);
       else release(b);
     }
-    else if (act === 'relearn') {
-      if (b.dataset.confirm !== '1') { b.dataset.confirm = '1'; b.textContent = '¿Borrar y aprender de nuevo?'; return; }
-      b.disabled = true;
-      const ok = await run(sb.from('gym').update({ lat: null, lng: null, source: null, learned_at: null }).eq('id', 1));
-      if (ok) {
-        const { data, error } = await sb.rpc('admin_learn_gym');
-        if (error) toast(explain(error));
-        else toast(data ? 'Listo: se volvió a aprender la ubicación con las marcas que ya hay.' : 'Ubicación borrada. Se va a aprender con las próximas marcas.', 6000);
-        await reload(['config', 'gym', 'status']);
-      } else release(b, 'Volver a aprender');
-    }
     else if (act === 'gym-from-loc') {
       const lat = Number(b.dataset.lat), lng = Number(b.dataset.lng);
       if (b.dataset.confirm !== '1') { b.dataset.confirm = '1'; b.textContent = '¿Seguro? Desde ahí se mide el radio'; return; }
@@ -712,9 +722,8 @@
       if (!weekdays.length) return toast('Marcá al menos un día de entrenamiento.');
       if ((lat === null) !== (lng === null) || (lat !== null && (!isFinite(lat) || !isFinite(lng) || Math.abs(lat) > 90 || Math.abs(lng) > 180))) return toast('Revisá la latitud y la longitud del gym.');
       if (!(radius >= 30 && radius <= 2000)) return toast('El radio tiene que estar entre 30 y 2.000 metros.');
-      const verify = Math.round(Number($('cfgVerify').value)), ldays = Math.round(Number($('cfgLearnDays').value)), lpeople = Math.round(Number($('cfgLearnPeople').value));
-      if (!(verify >= 5 && verify <= 500)) return toast('La distancia para dar OK tiene que estar entre 5 y 500 m.');
-      if (!(ldays >= 1 && ldays <= 30) || !(lpeople >= 1 && lpeople <= 20)) return toast('Revisá los días (1 a 30) y las personas (1 a 20) para aprender.');
+      const verify = Math.round(Number($('cfgVerify').value));
+      if (!(verify >= 5 && verify <= 500)) return toast('El perímetro tiene que estar entre 5 y 500 m.');
       // Todo se lee antes de guardar: después del primer guardado la pantalla se puede redibujar.
       const title = $('cfgTitle').value.trim().slice(0, 60) || 'Pacto del Gym', gymName = $('gymName').value.trim().slice(0, 60) || null;
       b.disabled = true;
@@ -722,7 +731,7 @@
       const moved = lat !== (typeof g0.lat === 'number' ? g0.lat : null) || lng !== (typeof g0.lng === 'number' ? g0.lng : null);
       let ok = moved ? await run(sb.from('gym').upsert({ id: 1, lat: lat, lng: lng, source: lat === null ? null : 'manual', learned_at: null })) : true;
       if (ok) ok = await run(sb.from('config').update({
-        verify_m: verify, learn_days: ldays, learn_people: lpeople,
+        verify_m: verify,
         title: title, fine: Math.round(fine), weekdays: weekdays, start_date: start,
         gym_name: gymName, gym_radius_m: radius, updated_at: new Date().toISOString()
       }).eq('id', 1), 'Ajustes guardados.');

@@ -407,3 +407,7 @@ input[type="password"] {
 .note.warn-note, .sub.warn-note { color: var(--ink); background: color-mix(in srgb, var(--warn) 18%, transparent); border-radius: 8px; padding: 6px 10px; }
 .rank .right { justify-items: end; }
 .rank .right .pill + .pill { margin-top: 2px; }
+
+/* "!" = marcó pero no fue en el gym: cuenta como falta */
+.cell.out { background: var(--fill-red); color: #fff; font-size: 15px; box-shadow: inset 0 0 0 2px var(--warn); }
+.legend .cell.out { font-size: 11px; }

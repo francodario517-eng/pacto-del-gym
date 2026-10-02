@@ -12,17 +12,16 @@ Registro de asistencias al gym del grupo. Cada día de entrenamiento sin marcar 
   - El usuario no se puede cambiar después del alta.
   - La ubicación exacta del gym sólo la ve el organizador.
 
-## Ubicación del gym: se aprende de las marcas
+## Análisis de las marcas: cada persona contra sí misma
 
-- **Sin ubicación cargada,** se marca desde cualquier lado. Cada marca guarda desde dónde se hizo, en `checkin_locations`, que sólo ve el organizador.
-- **Cuándo se fija:** cuando 2 personas marcaron al menos 2 días cada una desde el mismo lugar (a menos de 25 m), con 3 días distintos en total. Se toma del grupo y no de cada persona, porque alguien que marca siempre desde su casa también sería "constante".
-- **Después,** según la distancia al gym:
-  - hasta 25 m, la marca queda **OK**;
-  - entre 25 y 200 m, queda **a revisar**: aparece con "!" a la vista de todos y el organizador la aprueba o la saca;
-  - a más de 200 m, no deja marcar.
-- **Las marcas anteriores** se vuelven a evaluar contra el gym aprendido.
-- **En Ajustes** se cambian los 25 m, los días y las personas. También están **Volver a aprender** y la carga a mano.
-- **El mensaje de rechazo no da la distancia,** para que nadie pueda calcular dónde está el gym.
+- **No hace falta cargar la ubicación del gym.** Cada marca guarda desde dónde se hizo, en `checkin_locations`, que sólo ve el organizador.
+- **Cada persona se compara sólo con sus propias marcas;** las de otro usuario no influyen. Las marcas a menos de 50 m entre sí son el mismo lugar.
+- **Si marcó desde un solo lugar:** todo **OK**.
+- **Si marcó desde más de un lugar:** sus marcas quedan **en análisis** (?), cuentan como que fue, y le salta un aviso al organizador.
+- **Cuándo se decide:** cuando un lugar junta 3 marcas o más y le saca 2 al siguiente, ese es su gym. Las marcas de los otros lugares quedan **no fue en el gym** (!) y **cuentan como falta** hasta que el organizador las apruebe.
+- **Si el organizador carga a mano la ubicación del gym,** manda esa sobre el análisis.
+- **Límite:** alguien que marca siempre desde el mismo lugar que no es el gym no salta, porque se compara sólo consigo mismo. Para eso está la ubicación cargada a mano.
+- **El mensaje de rechazo no da la distancia.**
 
 **Límite conocido:** la ubicación la manda el celular. Alguien con conocimientos técnicos y las coordenadas del gym podría falsearla. El sistema lo hace difícil, pero no imposible. Cada marca queda guardada con la hora y la distancia, a la vista del organizador.
 
