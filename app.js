@@ -10,7 +10,13 @@
   const MONTHS = ['enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio', 'julio', 'agosto', 'septiembre', 'octubre', 'noviembre', 'diciembre'];
   const $ = id => document.getElementById(id);
   const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
-  const today = () => L.ymd(new Date());
+  // "Hoy" y las horas siempre en hora de Paraguay, igual que el servidor (py_today),
+  // aunque el celular tenga otra zona horaria configurada.
+  const TZ = 'America/Asuncion';
+  const fmtDay = new Intl.DateTimeFormat('en-CA', { timeZone: TZ, year: 'numeric', month: '2-digit', day: '2-digit' });
+  const fmtTime = new Intl.DateTimeFormat('es-PY', { timeZone: TZ, hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
+  const fmtDM = new Intl.DateTimeFormat('es-PY', { timeZone: TZ, day: 'numeric', month: 'numeric' });
+  const today = () => fmtDay.format(new Date());
   const yesterday = () => L.addDays(today(), -1);
   const monthName = ym => MONTHS[Number(ym.slice(5, 7)) - 1] + ' ' + ym.slice(0, 4);
   const dayLong = d => WD_NAME[L.wday(d)] + ' ' + Number(d.slice(8)) + ' de ' + MONTHS[Number(d.slice(5, 7)) - 1];
@@ -20,8 +26,12 @@
   const emailOf = u => u.trim().toLowerCase() + '@' + (CFG.domain || 'pactodelgym.app');
   const USER_RE = /^[a-z0-9._-]{3,30}$/;
 
-  if (!window.supabase || !CFG.url || /PEGAR/.test(CFG.url)) {
+  if (!CFG.url || /PEGAR/.test(CFG.url)) {
     document.body.innerHTML = '<p style="padding:24px;font-family:system-ui">Falta configurar la conexión con la base (config.js).</p>';
+    return;
+  }
+  if (!window.supabase) {
+    document.body.innerHTML = '<p style="padding:24px;font-family:system-ui">Sin conexión: no se pudo cargar la página completa. Revisá internet y recargá.</p>';
     return;
   }
   const sb = window.supabase.createClient(CFG.url, CFG.anonKey, { auth: { persistSession: true, autoRefreshToken: true, storageKey: 'pacto-auth' } });
@@ -62,10 +72,26 @@
     if (!error) return '';
     const msg = String(error.message || '');
     if (error.code === 'P0001' && msg) return msg;
+    // Errores del login de Supabase, que vienen en inglés.
+    const auth = {
+      same_password: 'La contraseña nueva tiene que ser distinta de la actual.',
+      weak_password: 'La contraseña es muy débil. Usá al menos 6 caracteres.',
+      user_already_exists: 'Ese usuario ya existe.',
+      email_exists: 'Ese usuario ya existe.',
+      unexpected_failure: 'La base rechazó el alta. Revisá el usuario y probá de nuevo.',
+      over_request_rate_limit: 'Demasiados intentos. Esperá un minuto y probá de nuevo.',
+      over_email_send_rate_limit: 'Demasiados intentos. Esperá un minuto y probá de nuevo.',
+      invalid_credentials: 'Usuario o contraseña incorrectos.'
+    }[error.code];
+    if (auth) return auth;
+    if (/Database error saving new user/i.test(msg)) return 'La base rechazó el alta. Revisá el usuario y probá de nuevo.';
+    if (/different from the old password/i.test(msg)) return 'La contraseña nueva tiene que ser distinta de la actual.';
+    if (/at least \d+ characters|weak/i.test(msg)) return 'La contraseña es muy débil. Usá al menos 6 caracteres.';
     if (/JWT|session/i.test(msg)) return 'Se venció la sesión. Volvé a entrar.';
     if (error.code === '42501' || /row-level security|permission denied/i.test(msg)) return 'No tenés permiso para hacer eso.';
     if (/Failed to fetch|NetworkError/i.test(msg)) return 'Sin conexión. Revisá internet y probá de nuevo.';
-    return msg || 'No se pudo guardar. Probá de nuevo.';
+    // Cualquier otro mensaje del servidor puede venir en inglés: se muestra uno genérico.
+    return /[áéíóúñ¿¡]|^(No |El |La |Ya |Sin )/.test(msg) ? msg : 'No se pudo guardar. Probá de nuevo.';
   }
   async function run(promise, okMsg) {
     const { error, data } = await promise;
@@ -293,7 +319,7 @@
       '<span>Debés <b class="num">' + esc(L.gs(Math.max(0, ms.fine - paidOf(m.id, L.ymOf(t))))) + '</b></span></div>';
     $('today').innerHTML = html;
   }
-  const hhmm = iso => { const d = new Date(iso); return L.pad(d.getHours()) + ':' + L.pad(d.getMinutes()); };
+  const hhmm = iso => fmtTime.format(new Date(iso));
 
   function drawKpis(c, t, ym, rows) {
     const fine = rows.reduce((a, r) => a + r.st.fine, 0);
@@ -441,7 +467,7 @@
     if (rec && rec.at) {
       const byM = S.members.find(x => x.id === rec.by);
       const at = new Date(rec.at);
-      who = '<div class="sub">Marcado ' + (byM && byM.id !== m.id ? 'por ' + esc(byM.name) + ' ' : '') + 'el ' + at.getDate() + '/' + (at.getMonth() + 1) + ' a las ' + hhmm(rec.at) +
+      who = '<div class="sub">Marcado ' + (byM && byM.id !== m.id ? 'por ' + esc(byM.name) + ' ' : '') + 'el ' + fmtDM.format(at) + ' a las ' + hhmm(rec.at) +
         (typeof rec.distance_m === 'number' ? ', a ' + Math.round(rec.distance_m) + ' m del gym' : '') + '</div>';
     }
     const busy = S.busy.has(key) ? ' disabled' : '';
@@ -480,11 +506,12 @@
       '<label class="field"><span>El reto empieza el</span><input type="date" id="cfgStart" value="' + c.start + '"></label>' +
       '<div class="field"><span>Ubicación del gym</span>' +
         '<input type="text" id="gymName" maxlength="60" placeholder="Nombre (opcional)" value="' + esc(g.name) + '">' +
-        '<div class="gps-row"><input type="text" id="gymLat" inputmode="decimal" placeholder="Latitud" aria-label="Latitud" value="' + (typeof g.lat === 'number' ? g.lat : '') + '">' +
-        '<input type="text" id="gymLng" inputmode="decimal" placeholder="Longitud" aria-label="Longitud" value="' + (typeof g.lng === 'number' ? g.lng : '') + '">' +
-        '<label class="rad"><input type="number" id="gymRadius" min="30" max="2000" step="10" aria-label="Radio en metros" value="' + g.radius + '" style="width:100%"></label></div>' +
-        '<input type="text" id="gymPaste" placeholder="O pegá acá un link de Google Maps o «lat, long»">' +
-        '<small>El último número es el radio en metros. En el gym podés tocar «Usar mi ubicación».</small>' +
+        '<div class="gps-row">' +
+          '<label class="field"><small>Latitud</small><input type="text" id="gymLat" inputmode="decimal" placeholder="-25.2867" value="' + (typeof g.lat === 'number' ? g.lat : '') + '"></label>' +
+          '<label class="field"><small>Longitud</small><input type="text" id="gymLng" inputmode="decimal" placeholder="-57.6470" value="' + (typeof g.lng === 'number' ? g.lng : '') + '"></label>' +
+          '<label class="field rad"><small>Radio (m)</small><input type="number" id="gymRadius" min="30" max="2000" step="10" value="' + g.radius + '"></label></div>' +
+        '<input type="text" id="gymPaste" placeholder="O pegá un link de Google Maps" aria-label="Link de Google Maps o coordenadas">' +
+        '<small>También sirve pegar «latitud, longitud». Estando en el gym podés tocar «Usar mi ubicación».</small>' +
         '<div class="acts"><button class="btn small" type="button" data-act="gym-here">Usar mi ubicación</button></div></div>' +
       '<div class="foot"><button class="btn primary" data-act="save-cfg">Guardar ajustes</button></div>' +
       '<div class="field"><span>Feriados y días que no cuentan</span><div class="hols">' +
@@ -523,12 +550,23 @@
   // Redibuja Ajustes sin perder lo que se estaba escribiendo.
   function keepInputs(fn) {
     const vals = {};
+    const armed = [...$('setBody').querySelectorAll('[data-confirm="1"]')].map(x => ({ act: x.dataset.act, m: x.dataset.m, text: x.textContent }));
     $('setBody').querySelectorAll('input[id]').forEach(i => { vals[i.id] = i.type === 'checkbox' ? i.checked : i.value; });
     fn();
     for (const id in vals) {
       const i = $(id); if (!i || id === 'holNew') continue;
       if (i.type === 'checkbox') i.checked = vals[id]; else i.value = vals[id];
     }
+    for (const a of armed) {
+      const x = $('setBody').querySelector('[data-act="' + a.act + '"][data-m="' + a.m + '"]');
+      if (x) { x.dataset.confirm = '1'; x.textContent = a.text; }
+    }
+  }
+  // Si el servidor rechaza el cambio, el botón vuelve a quedar usable y desarmado.
+  function release(b, label) {
+    if (!b.isConnected) return;
+    b.disabled = false;
+    if (label) { delete b.dataset.confirm; b.textContent = label; }
   }
 
   // Lee coordenadas de un link de Google Maps o de un texto «lat, long».
@@ -611,7 +649,7 @@
         hol.push(v);
       } else hol = hol.filter(h => h !== b.dataset.d);
       b.disabled = true;
-      if (await run(sb.from('config').update({ holidays: hol.sort(), updated_at: new Date().toISOString() }).eq('id', 1), act === 'add-hol' ? 'Feriado agregado.' : 'Feriado quitado.')) await reload(['config']);
+      if (await run(sb.from('config').update({ holidays: hol.sort(), updated_at: new Date().toISOString() }).eq('id', 1), act === 'add-hol' ? 'Feriado agregado.' : 'Feriado quitado.')) await reload(['config']); else release(b);
     }
     else if (act === 'save-m') {
       const id = b.dataset.m, name = $('mn-' + id).value.trim().slice(0, 40), joined = $('mj-' + id).value;
@@ -625,12 +663,12 @@
       if (b.dataset.confirm !== '1') { b.dataset.confirm = '1'; b.textContent = '¿Seguro?'; return; }
       b.disabled = true;
       // El último día que cuenta es ayer; su historia queda en el tablero.
-      if (await run(sb.from('profiles').update({ left_on: yesterday() }).eq('id', b.dataset.m), 'Dado de baja. Sus días anteriores quedan en el historial.')) await reload(['profiles']);
+      if (await run(sb.from('profiles').update({ left_on: yesterday() }).eq('id', b.dataset.m), 'Dado de baja. Sus días anteriores quedan en el historial.')) await reload(['profiles']); else release(b, 'Dar de baja');
     }
     else if (act === 'back-m') {
       b.disabled = true;
       // Sólo se quita la baja; no se toca desde cuándo cuenta, para no perder su historia.
-      if (await run(sb.from('profiles').update({ left_on: null }).eq('id', b.dataset.m), 'Reincorporado.')) await reload(['profiles']);
+      if (await run(sb.from('profiles').update({ left_on: null }).eq('id', b.dataset.m), 'Reincorporado.')) await reload(['profiles']); else release(b);
     }
     else if (act === 'pass-m') {
       const id = b.dataset.m, m = S.members.find(x => x.id === id);
@@ -639,9 +677,10 @@
       b.disabled = true;
       if (await run(sb.rpc('admin_set_password', { p_member: id, p_password: pass }))) {
         S.lastCred = { name: m.name, user: m.username, pass: pass };
+        delete b.dataset.confirm;   // ya se usó: que no quede armado al redibujar
         keepInputs(drawSettings);
         toast('Contraseña nueva para ' + m.name + '. Pasásela.');
-      }
+      } else release(b, 'Contraseña');
     }
     else if (act === 'copy-cred') {
       const txt = $('credBox').innerText.replace(/^Pasale esto a [^:]+:\s*/, '');
@@ -684,7 +723,7 @@
       btn.disabled = false;
       if (error) {
         await sb.from('invites').delete().eq('username', user);
-        return toast(/registered|exists/i.test(error.message) ? 'Ese usuario ya existe.' : 'No se pudo crear: ' + explain(error), 7000);
+        return toast(/registered|exists/i.test(error.message) ? 'Ese usuario ya existe.' : explain(error), 7000);
       }
       S.lastCred = { name: name, user: user, pass: pass };
       await reload(['profiles']);

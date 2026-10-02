@@ -391,3 +391,12 @@ img { max-width: 100%; }
 .mrow input[type="text"], .mrow input[type="date"] { width: 100%; }
 #addForm input { width: 100%; }
 dialog h3:focus { outline: none; }
+
+/* Contraseñas con el mismo estilo que el resto de los campos */
+input[type="password"] {
+  border: 1px solid var(--line); background: var(--surface-2); border-radius: 8px; padding: 8px 10px; min-width: 0;
+}
+.gps-row input { width: 100%; }
+.gps-row .field { gap: 4px; }
+/* La pista de deslizar sólo hace falta donde el mes no entra entero */
+@media (min-width: 1000px) { .sec-h .hint.swipe { display: none; } }
