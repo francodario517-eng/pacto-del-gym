@@ -42,9 +42,10 @@
     const r = S.cfgRow || {};
     return L.normConfig({ title: r.title, fine: r.fine, weekdays: r.weekdays, start: r.start_date, holidays: r.holidays }, today());
   };
+  // Las coordenadas sólo le llegan al admin (tabla gym); los demás sólo saben si están cargadas.
   const gym = () => {
-    const r = S.cfgRow || {};
-    return { name: r.gym_name || '', lat: r.gym_lat, lng: r.gym_lng, radius: r.gym_radius_m || 200, set: typeof r.gym_lat === 'number' && typeof r.gym_lng === 'number' };
+    const r = S.cfgRow || {}, g = S.gymRow || {};
+    return { name: r.gym_name || '', lat: g.lat, lng: g.lng, radius: r.gym_radius_m || 200, set: !!r.gym_set };
   };
   const ctx = () => ({ att: S.att, exc: S.exc });
   const me = () => S.members.find(m => m.id === S.myId) || null;
@@ -90,6 +91,12 @@
       const { data, error } = await sb.from('config').select('*').eq('id', 1).maybeSingle();
       if (error) throw error;
       S.cfgRow = data;
+    },
+    gym: async () => {
+      // Para quien no es admin la regla de la base devuelve vacío: no es un error.
+      const { data, error } = await sb.from('gym').select('lat,lng').eq('id', 1).maybeSingle();
+      if (error) throw error;
+      S.gymRow = data;
     },
     profiles: async () => {
       const rows = await fetchAll('profiles', 'id,username,name,is_admin,joined,left_on');
@@ -473,8 +480,8 @@
       '<label class="field"><span>El reto empieza el</span><input type="date" id="cfgStart" value="' + c.start + '"></label>' +
       '<div class="field"><span>Ubicación del gym</span>' +
         '<input type="text" id="gymName" maxlength="60" placeholder="Nombre (opcional)" value="' + esc(g.name) + '">' +
-        '<div class="gps-row"><input type="text" id="gymLat" inputmode="decimal" placeholder="Latitud" aria-label="Latitud" value="' + (g.set ? g.lat : '') + '">' +
-        '<input type="text" id="gymLng" inputmode="decimal" placeholder="Longitud" aria-label="Longitud" value="' + (g.set ? g.lng : '') + '">' +
+        '<div class="gps-row"><input type="text" id="gymLat" inputmode="decimal" placeholder="Latitud" aria-label="Latitud" value="' + (typeof g.lat === 'number' ? g.lat : '') + '">' +
+        '<input type="text" id="gymLng" inputmode="decimal" placeholder="Longitud" aria-label="Longitud" value="' + (typeof g.lng === 'number' ? g.lng : '') + '">' +
         '<label class="rad"><input type="number" id="gymRadius" min="30" max="2000" step="10" aria-label="Radio en metros" value="' + g.radius + '" style="width:100%"></label></div>' +
         '<input type="text" id="gymPaste" placeholder="O pegá acá un link de Google Maps o «lat, long»">' +
         '<small>El último número es el radio en metros. En el gym podés tocar «Usar mi ubicación».</small>' +
@@ -587,12 +594,13 @@
       if ((lat === null) !== (lng === null) || (lat !== null && (!isFinite(lat) || !isFinite(lng) || Math.abs(lat) > 90 || Math.abs(lng) > 180))) return toast('Revisá la latitud y la longitud del gym.');
       if (!(radius >= 30 && radius <= 2000)) return toast('El radio tiene que estar entre 30 y 2.000 metros.');
       b.disabled = true;
-      const ok = await run(sb.from('config').update({
+      let ok = await run(sb.from('gym').upsert({ id: 1, lat: lat, lng: lng }));
+      if (ok) ok = await run(sb.from('config').update({
         title: $('cfgTitle').value.trim().slice(0, 60) || 'Pacto del Gym', fine: Math.round(fine), weekdays: weekdays, start_date: start,
-        gym_name: $('gymName').value.trim().slice(0, 60) || null, gym_lat: lat, gym_lng: lng, gym_radius_m: radius, updated_at: new Date().toISOString()
+        gym_name: $('gymName').value.trim().slice(0, 60) || null, gym_radius_m: radius, updated_at: new Date().toISOString()
       }).eq('id', 1), 'Ajustes guardados.');
       b.disabled = false;
-      if (ok) await reload(['config']);
+      if (ok) await reload(['config', 'gym']);
     }
     else if (act === 'add-hol' || act === 'rm-hol') {
       let hol = c.holidays.slice();
@@ -666,11 +674,13 @@
       if (S.members.some(m => m.username === user)) return toast('Ya existe el usuario ' + user + '.');
       if (pass.length < 6) return toast('La contraseña tiene que tener al menos 6 caracteres.');
       const btn = f.querySelector('button[type="submit"]'); btn.disabled = true;
-      // 1) Se habilita el usuario. 2) Se crea con un cliente aparte para no cerrar la sesión del admin.
-      const inv = await run(sb.from('invites').upsert({ username: user, name: name }));
+      // 1) Se habilita el usuario con un código secreto de un solo uso.
+      // 2) Se crea con un cliente aparte (para no cerrar la sesión del admin) presentando ese código.
+      const code = crypto.randomUUID();
+      const inv = await run(sb.from('invites').upsert({ username: user, name: name, code: code }));
       if (!inv) { btn.disabled = false; return; }
       const tmp = window.supabase.createClient(CFG.url, CFG.anonKey, { auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false, storageKey: 'pacto-alta' } });
-      const { error } = await tmp.auth.signUp({ email: emailOf(user), password: pass });
+      const { error } = await tmp.auth.signUp({ email: emailOf(user), password: pass, options: { data: { invite_code: code } } });
       btn.disabled = false;
       if (error) {
         await sb.from('invites').delete().eq('username', user);

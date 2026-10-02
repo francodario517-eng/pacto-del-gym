@@ -8,15 +8,23 @@ Registro de asistencias al gym del grupo. Cada día de entrenamiento sin marcar 
   - Todos los que inician sesión ven todo.
   - Cada uno sólo puede marcar **su** día de **hoy**, y sólo si el celular está dentro del radio del gym. La función `check_in` calcula la distancia en el servidor.
   - Ajustes, justificados, multas cobradas, altas y bajas: sólo el organizador.
-  - Nadie puede crearse un usuario si el organizador no lo habilitó antes.
+  - Nadie puede crearse un usuario sin el código secreto de un solo uso que genera el organizador.
+  - El usuario no se puede cambiar después del alta.
+  - La ubicación exacta del gym sólo la ve el organizador.
+
+**Límite conocido:** la ubicación la manda el celular. Alguien con conocimientos técnicos y las coordenadas del gym podría falsearla. El sistema lo hace difícil, pero no imposible. Cada marca queda guardada con la hora y la distancia, a la vista del organizador.
 
 ## Puesta en marcha
 
 1. En Supabase, crear el proyecto.
 2. En **Authentication → Sign In / Providers → Email**, apagar *Confirm email*.
-3. En el **SQL Editor**, pegar y correr `supabase/schema.sql`. Habilita al usuario `dario` como organizador.
+3. En el **SQL Editor**, pegar y correr `supabase/schema.sql`. Al final muestra el `codigo_de_alta` del usuario `dario`.
 4. En `config.js`, poner la *Project URL* y la clave *anon*.
-5. Entrar a la página. El organizador entra con su usuario, carga la ubicación del gym en **Ajustes** y crea los usuarios de los demás desde ahí.
+5. Crear la cuenta del organizador:
+   `node scripts/crear-admin.mjs <PROJECT_URL> <ANON_KEY> <CODIGO_DE_ALTA> <CONTRASEÑA>`
+6. Entrar a la página como `dario`.
+   - En **Ajustes**, cargar la ubicación del gym.
+   - Crear los usuarios de los demás desde **Crear usuario**. Te da la contraseña lista para copiar y mandar.
 
 ## Reglas del reto
 
