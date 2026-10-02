@@ -62,10 +62,18 @@ var PactoLogic = (function () {
     const n = { done: 0, extra: 0, miss: 0, excused: 0, pending: 0 };
     for (const x of days) if (x.s in n) n[x.s]++;
     const counted = n.done + n.miss;
+    // Plus: ir un sábado o domingo (ya dentro del reto) perdona una falta del mismo mes.
+    const start = memberStart(m, c);
+    const bonus = days.filter(x => x.s === 'extra' && (wday(x.d) === 0 || wday(x.d) === 6) &&
+      x.d >= start && !(isYmd(m.left) && x.d > m.left)).length;
+    const saved = Math.min(bonus, n.miss);
+    const rawMiss = n.miss;
     return Object.assign(n, {
       days: days, counted: counted,
-      rate: counted ? n.done / counted : null,
-      fine: n.miss * c.fine,
+      rate: counted ? n.done / counted : null,   // asistencia real, sin contar el plus
+      rawMiss: rawMiss, bonus: bonus, saved: saved,
+      miss: rawMiss - saved,                     // faltas que pagan
+      fine: (rawMiss - saved) * c.fine,
       gone: n.done + n.extra
     });
   }

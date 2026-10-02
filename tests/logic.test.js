@@ -189,3 +189,32 @@ test("rank: comparten puesto sólo si empatan en faltas, porcentaje e idas", () 
   eq(r.map(x => x.m.name + ":" + x.pos), ["A:1", "C:2", "B:3", "D:3"]);
 });
 test('rank: vacio', () => { eq(L.rank([]), []); });
+
+test('plus de fin de semana: cada sábado o domingo perdona una falta del mes', () => {
+  // Reto desde el lunes 5/10/2026, lunes a viernes. Hoy: viernes 16/10.
+  const c = L.normConfig({ start: '2026-10-05', weekdays: [1, 2, 3, 4, 5] }, 'x');
+  const T2 = '2026-10-16';
+  const m = { id: 'p', joined: '2026-10-02' };
+  const k = d => 'p~' + d;
+  // Fue todos los días hábiles salvo el 7 y el 8 (2 faltas); fue el sábado 10.
+  const went = ['2026-10-05', '2026-10-06', '2026-10-09', '2026-10-10', '2026-10-12', '2026-10-13', '2026-10-14', '2026-10-15', '2026-10-16'];
+  const st = L.monthStats(m, '2026-10', c, { att: S(went.map(k)), exc: S([]) }, T2);
+  eq([st.rawMiss, st.bonus, st.saved, st.miss, st.fine], [2, 1, 1, 1, 5000]);
+  // Dos findes: ya no paga nada; el plus que sobra no se acumula.
+  const st2 = L.monthStats(m, '2026-10', c, { att: S(went.concat(['2026-10-11', '2026-10-04']).map(k)), exc: S([]) }, T2);
+  eq([st2.bonus, st2.saved, st2.miss, st2.fine], [2, 2, 0, 0]);   // el domingo 4 es antes del inicio: no suma
+  // Sin faltas, el plus no da saldo a favor.
+  const st3 = L.monthStats(m, '2026-10', c, { att: S(['2026-10-05', '2026-10-06', '2026-10-07', '2026-10-08', '2026-10-09', '2026-10-10'].map(k)), exc: S([]) }, '2026-10-10');
+  eq([st3.rawMiss, st3.bonus, st3.miss, st3.fine], [0, 1, 0, 0]);
+  // La asistencia (%) es la real, sin el plus.
+  eq(Math.round(st.rate * 100), 80);
+});
+
+test('reto que empieza el lunes: el viernes y el finde anteriores no cuentan', () => {
+  const c = L.normConfig({ start: '2026-10-05' }, 'x');
+  const m = { id: 'q', joined: '2026-10-02' };
+  const z = { att: S([]), exc: S([]) };
+  eq(L.dayState('2026-10-02', m, c, z, '2026-10-02'), 'off');
+  eq(L.monthStats(m, '2026-10', c, z, '2026-10-04').miss, 0);
+  eq(L.monthStats(m, '2026-10', c, z, '2026-10-06').miss, 1);   // el lunes 5 sí es falta
+});

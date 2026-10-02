@@ -343,10 +343,16 @@
       html += '<button class="plate" disabled><span class="spin" aria-hidden="true"></span><span class="small">' +
         (S.checking === 'locating' ? 'Buscando tu ubicación' : 'Verificando') + '</span></button>';
     } else {
-      const counts = st === 'pending';
-      html += '<button class="plate' + (counts ? '' : ' off') + '" data-act="checkin">' +
-        (counts ? '<span class="small">Tocá al llegar</span><span class="big">Fui<br>hoy</span><span class="small">evitá ' + esc(L.gs(c.fine)) + '</span>'
-                : '<span class="small">Hoy no cuenta</span><span class="big">Fui<br>igual</span><span class="small">suma como extra</span>') + '</button>';
+      const counts = st === 'pending', start = L.memberStart(m, c);
+      const finde = L.wday(t) === 0 || L.wday(t) === 6;
+      if (t < start) {
+        html += '<button class="plate off" disabled><span class="small">El reto empieza</span><span class="big">' + esc(WD_NAME[L.wday(start)]) + '<br>' + Number(start.slice(8)) + '</span><span class="small">' + esc(MONTHS[Number(start.slice(5, 7)) - 1]) + '</span></button>';
+      } else {
+        html += '<button class="plate' + (counts ? '' : ' off') + '" data-act="checkin">' +
+          (counts ? '<span class="small">Tocá al llegar</span><span class="big">Fui<br>hoy</span><span class="small">evitá ' + esc(L.gs(c.fine)) + '</span>'
+                  : finde ? '<span class="small">Fin de semana</span><span class="big">Plus</span><span class="small">te perdona una falta</span>'
+                          : '<span class="small">Hoy no cuenta</span><span class="big">Fui<br>igual</span><span class="small">suma como extra</span>') + '</button>';
+      }
       html += '<div class="note">' + (g.set ? 'Se marca sólo estando en el gym' + (g.name ? ' (' + esc(g.name) + ')' : '') + '. Te va a pedir la ubicación.'
                                           : 'Te va a pedir la ubicación: se guarda desde dónde marcaste.') + '</div>';
     }
@@ -395,7 +401,7 @@
       return '<li class="' + (r.pos === 1 && r.st.counted > 0 ? 'lead' : '') + '">' +
         '<span class="pos num">' + r.pos + '</span>' + avatar(r.m) +
         '<div style="min-width:0"><div class="name">' + esc(r.m.name) + (m0 && m0.id === r.m.id ? '<span class="me">vos</span>' : '') + '</div>' +
-          '<div class="sub num"><span>Fue <b>' + r.st.gone + '</b></span><span>Racha <b>' + r.sk.cur + '</b></span><span>Mejor <b>' + r.sk.best + '</b></span>' +
+          '<div class="sub num"><span>Fue <b>' + r.st.gone + '</b></span>' + (r.st.bonus ? '<span>Plus <b>' + r.st.bonus + '</b></span>' : '') + '<span>Racha <b>' + r.sk.cur + '</b></span><span>Mejor <b>' + r.sk.best + '</b></span>' +
           (r.st.rate != null ? '<span><b>' + Math.round(r.st.rate * 100) + '%</b></span>' : '') + '</div>' +
           '<div class="strip" aria-hidden="true">' + strip + '</div></div>' +
         '<div class="right">' + pill + '<span class="fine num' + (r.st.fine ? '' : ' zero') + '">' + esc(L.gs(r.st.fine)) + '</span></div></li>';
@@ -485,7 +491,7 @@
         ? (owed > 0 ? '<button class="btn small" data-act="pay" data-m="' + esc(r.m.id) + '">Cobrado</button>'
                     : '<button class="btn small" data-act="unpay" data-m="' + esc(r.m.id) + '">Deshacer</button>')
         : '';
-      return '<tr><td><span class="who-cell">' + avatar(r.m, true) + '<span>' + esc(r.m.name) + '<small class="num">' + r.st.miss + (r.st.miss === 1 ? ' falta' : ' faltas') + '</small></span></span></td>' +
+      return '<tr><td><span class="who-cell">' + avatar(r.m, true) + '<span>' + esc(r.m.name) + '<small class="num">' + r.st.miss + (r.st.miss === 1 ? ' falta' : ' faltas') + (r.st.saved ? ' (' + r.st.saved + (r.st.saved === 1 ? ' salvada' : ' salvadas') + ' por el finde)' : '') + '</small></span></span></td>' +
         '<td class="r num amt">' + esc(L.gs(r.st.fine)) + '</td><td><span class="state-cell">' + state + btn + '</span></td></tr>';
     }).join('');
     el.innerHTML = '<table class="fines"><thead><tr><th>Persona</th><th class="r">Multa</th><th>Estado</th></tr></thead><tbody>' + body +
