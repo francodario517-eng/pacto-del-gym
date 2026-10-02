@@ -99,12 +99,19 @@ create table if not exists public.excuses (
 -- Multas cobradas, por persona y por mes (AAAA-MM).
 create table if not exists public.payments (
   member  uuid not null references public.profiles (id) on delete cascade,
-  month   text not null check (month ~ '^\d{4}-(0[1-9]|1[0-2])$'),
+  month   text not null,
   amount  int  not null check (amount >= 0),
   by      uuid references public.profiles (id) on delete set null,
   at      timestamptz not null default now(),
   primary key (member, month)
 );
+
+-- Mes válido (01 a 12). Se rehace siempre para que también llegue a bases ya creadas.
+alter table public.payments drop constraint if exists payments_month_check;
+alter table public.payments add constraint payments_month_check check (month ~ '^\d{4}-(0[1-9]|1[0-2])$');
+
+-- Saneamiento: las versiones anteriores guardaban la posición del celular en cada marca.
+update public.checkins set lat = null, lng = null where lat is not null or lng is not null;
 
 -- ---------- Funciones de apoyo ----------
 
@@ -224,8 +231,9 @@ begin
     raise exception 'Estás a % m del gym. Para marcar tenés que estar a menos de % m.', round(d)::int, c.gym_radius_m;
   end if;
 
+  -- No se guarda la posición: como cae dentro del radio, delataría dónde está el gym.
   insert into public.checkins (member, day, by, lat, lng, accuracy_m, distance_m)
-  values (p.id, hoy, p.id, p_lat, p_lng, acc, round(d::numeric, 1))
+  values (p.id, hoy, p.id, null, null, acc, round(d::numeric, 1))
   on conflict (member, day) do nothing;
 
   return json_build_object('day', hoy, 'distance_m', round(d)::int);
@@ -293,6 +301,8 @@ end $$;
 revoke all on public.config, public.gym, public.invites, public.profiles, public.checkins, public.excuses, public.payments from anon;
 revoke truncate, references, trigger on public.config, public.gym, public.invites, public.profiles,
   public.checkins, public.excuses, public.payments from authenticated;
+-- La fila del gym tiene que existir siempre (config.gym_set depende de ella): nadie la borra.
+revoke delete on public.gym from authenticated;
 
 -- ---------- Tiempo real (la pantalla se actualiza sola) ----------
 do $$
