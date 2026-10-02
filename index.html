@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#1F55C6">
+<meta name="description" content="Asistencias al gym del grupo: multa por falta, tabla del reto, invictos y rachas.">
+<title>Pacto del Gym</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Ccircle cx='32' cy='32' r='30' fill='%231F55C6'/%3E%3Ccircle cx='32' cy='32' r='25' fill='none' stroke='%23163F95' stroke-width='3'/%3E%3Ccircle cx='32' cy='32' r='7' fill='%23fff'/%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@700;800;900&family=Barlow:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500;600&display=swap">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<!-- Ingreso con usuario y contraseña -->
+<section class="login" id="loginView" hidden>
+  <div class="login-card">
+    <div class="mark" aria-hidden="true"></div>
+    <h1>Pacto<br>del Gym</h1>
+    <p>Entrá con el usuario y la contraseña que te pasó el organizador.</p>
+    <form id="loginForm" autocomplete="on">
+      <label class="field" for="loginUser"><span>Usuario</span>
+        <input type="text" id="loginUser" autocomplete="username" autocapitalize="none" spellcheck="false" required></label>
+      <label class="field" for="loginPass"><span>Contraseña</span>
+        <input type="password" id="loginPass" autocomplete="current-password" required></label>
+      <button class="btn primary" type="submit" id="loginBtn">Entrar</button>
+    </form>
+    <div class="login-err" id="loginErr" role="alert"></div>
+  </div>
+</section>
+
+<div id="appView" hidden>
+<header class="top">
+  <div class="top-in">
+    <div class="brand"><h1 id="title">Pacto del Gym</h1><span class="tag" id="tag">5.000 Gs por falta</span></div>
+    <div class="monthnav">
+      <button class="iconbtn" id="prev" data-act="prev" aria-label="Mes anterior">‹</button>
+      <span class="lbl" id="monthLbl"></span>
+      <button class="iconbtn" id="next" data-act="next" aria-label="Mes siguiente">›</button>
+    </div>
+    <div class="acct">
+      <button class="btn" id="settingsBtn" data-act="settings" hidden>Ajustes</button>
+      <button class="btn" id="acctBtn" data-act="account">Mi cuenta</button>
+    </div>
+  </div>
+</header>
+
+<main class="wrap" id="app">
+  <div id="banner" hidden></div>
+  <section class="hero">
+    <div class="today" id="today"><div class="skeleton">Cargando el reto…</div></div>
+    <div class="kpis" id="kpis"></div>
+  </section>
+  <section class="sec">
+    <div class="sec-h"><h2>Tabla del reto</h2><span class="hint">Gana el que menos falta</span></div>
+    <ol class="rank" id="rank"></ol>
+  </section>
+  <div class="two">
+    <section class="sec">
+      <div class="sec-h"><h2>Los que más faltan</h2><span class="hint">faltas del mes</span></div>
+      <div class="bars" id="shame"></div>
+    </section>
+    <section class="sec">
+      <div class="sec-h"><h2>Invictos</h2><span class="hint">cero faltas en el mes</span></div>
+      <div id="invictos"></div>
+    </section>
+  </div>
+  <section class="sec">
+    <div class="sec-h"><h2>Calendario del mes</h2><span class="hint">Deslizá para ver el mes · tocá un día para el detalle</span></div>
+    <div class="matrix-wrap"><table class="matrix" id="matrix"></table></div>
+    <div class="legend">
+      <span><i class="cell s-done">✓</i>Fue</span>
+      <span><i class="cell s-miss">×</i>Faltó</span>
+      <span><i class="cell s-pending"></i>Hoy, falta marcar</span>
+      <span><i class="cell s-excused">J</i>Justificado</span>
+      <span><i class="cell s-extra">+</i>Fue en día libre</span>
+      <span><i class="cell s-off"></i>No cuenta</span>
+    </div>
+  </section>
+  <section class="sec">
+    <div class="sec-h"><h2>Multas del mes</h2><span class="hint" id="finesHint"></span></div>
+    <div class="tbl-wrap" id="fines"></div>
+  </section>
+  <p class="foot-note">Se marca desde el gym: el botón verifica que estés ahí. Las faltas se cuentan al terminar el día.</p>
+</main>
+</div>
+
+<dialog id="dayDlg"><div class="dlg" id="dayBody"></div></dialog>
+<dialog id="setDlg"><div class="dlg" id="setBody"></div></dialog>
+<dialog id="acctDlg"><div class="dlg" id="acctBody"></div></dialog>
+<div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js"></script>
+<script src="config.js"></script>
+<script src="logic.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
