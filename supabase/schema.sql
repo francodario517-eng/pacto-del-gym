@@ -34,6 +34,14 @@ insert into public.config (id) values (1) on conflict (id) do nothing;
 -- Versiones anteriores guardaban las coordenadas en config: se pasan a public.gym.
 alter table public.config add column if not exists gym_set boolean not null default false;
 
+-- Aprendizaje de la ubicación del gym (ver learn_gym más abajo).
+--   verify_m:      a cuántos metros del gym una marca queda OK; más lejos queda "a revisar".
+--   learn_days:    días distintos con marcas en el mismo lugar para dar por aprendido el gym.
+--   learn_people:  personas distintas que tienen que coincidir (una sola podría ser su casa).
+alter table public.config add column if not exists verify_m     int not null default 25 check (verify_m between 5 and 500);
+alter table public.config add column if not exists learn_days   int not null default 3  check (learn_days between 1 and 30);
+alter table public.config add column if not exists learn_people int not null default 2  check (learn_people between 1 and 20);
+
 -- Coordenadas del gym. Sólo el admin las lee: así nadie las copia para marcar desde su casa.
 create table if not exists public.gym (
   id   int primary key default 1 check (id = 1),
@@ -41,6 +49,9 @@ create table if not exists public.gym (
   lng  double precision check (lng between -180 and 180)
 );
 insert into public.gym (id) values (1) on conflict (id) do nothing;
+-- De dónde salió la ubicación: 'manual' (la cargó el admin) o 'aprendida' (de las marcas del grupo).
+alter table public.gym add column if not exists source text check (source in ('manual', 'aprendida'));
+alter table public.gym add column if not exists learned_at timestamptz;
 do $$
 begin
   if exists (select 1 from information_schema.columns where table_schema = 'public' and table_name = 'config' and column_name = 'gym_lat') then
@@ -86,6 +97,22 @@ create table if not exists public.checkins (
   primary key (member, day)
 );
 
+-- El admin puede aprobar a mano una marca que quedó "a revisar".
+alter table public.checkins add column if not exists approved boolean;
+
+-- Desde dónde se marcó cada asistencia. Sólo la ve el admin: como las marcas
+-- se hacen en el gym, mostrársela a todos delataría la ubicación del gym.
+create table if not exists public.checkin_locations (
+  member      uuid not null,
+  day         date not null,
+  lat         double precision not null check (lat between -90 and 90),
+  lng         double precision not null check (lng between -180 and 180),
+  accuracy_m  double precision,
+  at          timestamptz not null default now(),
+  primary key (member, day),
+  foreign key (member, day) references public.checkins (member, day) on delete cascade
+);
+
 -- Faltas justificadas por el admin (no pagan multa ni cortan la racha).
 create table if not exists public.excuses (
   member  uuid not null references public.profiles (id) on delete cascade,
@@ -110,7 +137,12 @@ create table if not exists public.payments (
 alter table public.payments drop constraint if exists payments_month_check;
 alter table public.payments add constraint payments_month_check check (month ~ '^\d{4}-(0[1-9]|1[0-2])$');
 
--- Saneamiento: las versiones anteriores guardaban la posición del celular en cada marca.
+-- Saneamiento: las versiones anteriores guardaban la posición del celular en cada marca,
+-- a la vista de todos. Se pasa a checkin_locations (sólo admin) y se borra de checkins.
+insert into public.checkin_locations (member, day, lat, lng, accuracy_m, at)
+select member, day, lat, lng, accuracy_m, at from public.checkins
+where lat is not null and lng is not null and lat between -90 and 90 and lng between -180 and 180
+on conflict (member, day) do nothing;
 update public.checkins set lat = null, lng = null where lat is not null or lng is not null;
 
 -- ---------- Funciones de apoyo ----------
@@ -134,7 +166,7 @@ $$;
 -- Distancia en metros entre dos puntos (fórmula de haversine).
 create or replace function public.distance_m(lat1 double precision, lng1 double precision,
                                              lat2 double precision, lng2 double precision)
-returns double precision language sql immutable set search_path = '' as $$
+returns double precision language sql immutable as $$
   select 2 * 6371000 * asin(sqrt(
     power(sin(radians(lat2 - lat1) / 2), 2) +
     cos(radians(lat1)) * cos(radians(lat2)) * power(sin(radians(lng2 - lng1) / 2), 2)))
@@ -150,6 +182,8 @@ end $$;
 drop trigger if exists on_gym_change on public.gym;
 create trigger on_gym_change after insert or update on public.gym
   for each row execute function public.sync_gym_set();
+-- Ubicaciones cargadas antes de que existiera "source": se cargaron a mano.
+update public.gym set source = 'manual' where lat is not null and source is null;
 update public.config set gym_set = exists (select 1 from public.gym where lat is not null and lng is not null) where id = 1;
 
 -- ---------- Alta de usuarios: sólo los habilitados y con su código ----------
@@ -196,9 +230,93 @@ create trigger on_auth_user_email_change
   before update of email on auth.users
   for each row execute function public.guard_email_change();
 
+-- ---------- Aprendizaje de la ubicación del gym ----------
+-- Si el gym no tiene ubicación, busca en las marcas de los últimos 60 días el lugar
+-- donde más personas coinciden: puntos a menos de verify_m metros entre sí, con al
+-- menos learn_days días distintos y learn_people personas que marcaron ahí en 2 días
+-- distintos o más (una sola visita a la casa de alguien no alcanza). Si lo encuentra,
+-- fija ahí el gym (promedio de esos puntos). No toca una ubicación ya cargada.
+create or replace function public.learn_gym() returns boolean
+language plpgsql security definer set search_path = '' as $$
+declare
+  c     public.config;
+  g     public.gym;
+  best  record;
+  desde date := public.py_today() - 60;
+  dlat  double precision;
+begin
+  -- Sin "for update": si dos marcas aprenden a la vez, la segunda encuentra el gym ya cargado.
+  select * into g from public.gym where id = 1;
+  if g.lat is not null and g.lng is not null then return false; end if;
+  select * into c from public.config where id = 1;
+  -- Caja alrededor de cada punto: filtro barato antes de calcular la distancia real.
+  dlat := c.verify_m / 111000.0;
+
+  select a.lat, a.lng, s.days, s.people into best
+  from public.checkin_locations a
+  cross join lateral (
+    with nb as (
+      select b.member, b.day from public.checkin_locations b
+      where b.day >= desde
+        and b.lat between a.lat - dlat and a.lat + dlat
+        and b.lng between a.lng - dlat / greatest(cos(radians(a.lat)), 0.01)
+                      and a.lng + dlat / greatest(cos(radians(a.lat)), 0.01)
+        and public.distance_m(a.lat, a.lng, b.lat, b.lng) <= c.verify_m)
+    select (select count(distinct nb.day) from nb) as days,
+           (select count(*) from (select nb.member from nb group by nb.member
+                                  having count(distinct nb.day) >= least(2, c.learn_days)) x) as people
+  ) s
+  -- Los candidatos a centro son las marcas de los últimos 14 días (los vecinos se cuentan
+  -- en los 60): así cada marca tarda unas décimas de segundo aunque haya mucho historial.
+  where a.day >= public.py_today() - 14 and s.days >= c.learn_days and s.people >= c.learn_people
+  order by s.people desc, s.days desc
+  limit 1;
+  if not found then return false; end if;
+
+  update public.gym set
+    (lat, lng) = (select avg(p.lat), avg(p.lng) from public.checkin_locations p
+                  where p.day >= desde
+                    and p.lat between best.lat - dlat and best.lat + dlat
+                    and public.distance_m(best.lat, best.lng, p.lat, p.lng) <= c.verify_m),
+    source = 'aprendida', learned_at = now()
+  where id = 1 and (lat is null or lng is null);
+  return found;
+end $$;
+
+-- Admin: intentar aprender ya (por ejemplo después de borrar la ubicación para que vuelva a aprender).
+create or replace function public.admin_learn_gym() returns boolean
+language plpgsql security definer set search_path = '' as $$
+begin
+  if not public.is_admin() then raise exception 'Sólo el organizador puede hacer esto.'; end if;
+  return public.learn_gym();
+end $$;
+
+-- Estado de cada marca para el tablero, sin revelar coordenadas:
+--   ok          a menos de verify_m del gym, o aprobada por el admin
+--   revisar     más lejos que verify_m del gym
+--   aprendiendo el gym todavía no tiene ubicación
+--   manual      la cargó el admin (sin ubicación)
+create or replace function public.checkin_status(p_from date, p_to date)
+returns table (member uuid, day date, status text)
+language sql stable security definer set search_path = '' as $$
+  select k.member, k.day,
+         case when k.approved then 'ok'
+              when l.member is null then 'manual'
+              when g.lat is null or g.lng is null then 'aprendiendo'
+              when public.distance_m(g.lat, g.lng, l.lat, l.lng) <= c.verify_m then 'ok'
+              else 'revisar' end
+  from public.checkins k
+  left join public.checkin_locations l on l.member = k.member and l.day = k.day
+  join public.gym g on g.id = 1
+  join public.config c on c.id = 1
+  where public.is_member() and k.day between p_from and p_to
+$$;
+
 -- ---------- Marcar asistencia (la única forma para quien no es admin) ----------
--- Valida en el servidor: que la persona esté en el reto, que el gym tenga
--- ubicación cargada y que el celular esté dentro del radio.
+-- Valida en el servidor que la persona esté en el reto y mande una ubicación.
+-- Si el gym ya tiene ubicación cargada, además exige estar dentro del radio;
+-- si todavía no, la marca se acepta igual. En los dos casos se guarda desde
+-- dónde se marcó (tabla checkin_locations, que sólo ve el admin).
 create or replace function public.check_in(p_lat double precision, p_lng double precision,
                                            p_accuracy double precision default null)
 returns json language plpgsql security definer set search_path = '' as $$
@@ -216,9 +334,6 @@ begin
 
   select * into c from public.config where id = 1;
   select * into g from public.gym where id = 1;
-  if g.lat is null or g.lng is null then
-    raise exception 'El organizador todavía no cargó la ubicación del gym.';
-  end if;
   if p_lat is null or p_lng is null or p_lat = 'NaN' or p_lng = 'NaN'
      or p_lat not between -90 and 90 or p_lng not between -180 and 180 then
     raise exception 'No llegó una ubicación válida.';
@@ -226,15 +341,25 @@ begin
 
   -- Margen por la precisión del GPS adentro del local, con tope de 50 m.
   acc := case when p_accuracy is null or p_accuracy = 'NaN' then 0 else least(greatest(p_accuracy, 0), 50) end;
-  d := public.distance_m(g.lat, g.lng, p_lat, p_lng);
-  if d > c.gym_radius_m + acc then
-    raise exception 'Estás a % m del gym. Para marcar tenés que estar a menos de % m.', round(d)::int, c.gym_radius_m;
+  if g.lat is not null and g.lng is not null then
+    d := public.distance_m(g.lat, g.lng, p_lat, p_lng);
+    if d > c.gym_radius_m + acc then
+      -- Sin la distancia exacta: con tres intentos desde lugares distintos se podría calcular dónde está el gym.
+      raise exception 'No estás en el gym. Para marcar tenés que estar a menos de % m.', c.gym_radius_m;
+    end if;
   end if;
 
-  -- No se guarda la posición: como cae dentro del radio, delataría dónde está el gym.
+  -- La posición no va en checkins (la ve todo el grupo): va aparte, sólo para el admin.
   insert into public.checkins (member, day, by, lat, lng, accuracy_m, distance_m)
   values (p.id, hoy, p.id, null, null, acc, round(d::numeric, 1))
   on conflict (member, day) do nothing;
+  if found then
+    insert into public.checkin_locations (member, day, lat, lng, accuracy_m)
+    values (p.id, hoy, p_lat, p_lng, case when p_accuracy is null or p_accuracy = 'NaN' then null else least(greatest(p_accuracy, 0), 100000) end)
+    on conflict (member, day) do nothing;
+    -- Si el gym todavía no tiene ubicación, esta marca puede ser la que completa el aprendizaje.
+    if g.lat is null then perform public.learn_gym(); end if;
+  end if;
 
   return json_build_object('day', hoy, 'distance_m', round(d)::int);
 end $$;
@@ -266,6 +391,11 @@ revoke all on function public.is_admin(), public.is_member(), public.py_today(),
   public.distance_m(double precision, double precision, double precision, double precision),
   public.handle_new_user(), public.guard_email_change(), public.sync_gym_set() from public, anon, authenticated;
 grant execute on function public.check_in(double precision, double precision, double precision) to authenticated;
+revoke all on function public.learn_gym() from public, anon, authenticated;
+revoke all on function public.admin_learn_gym() from public, anon;
+revoke all on function public.checkin_status(date, date) from public, anon;
+grant execute on function public.admin_learn_gym() to authenticated;
+grant execute on function public.checkin_status(date, date) to authenticated;
 grant execute on function public.undo_check_in() to authenticated;
 grant execute on function public.admin_set_password(uuid, text) to authenticated;
 grant execute on function public.is_admin(), public.is_member(), public.py_today(),
@@ -274,6 +404,7 @@ grant execute on function public.is_admin(), public.is_member(), public.py_today
 -- ---------- Reglas de acceso (RLS) ----------
 alter table public.config   enable row level security;
 alter table public.gym      enable row level security;
+alter table public.checkin_locations enable row level security;
 alter table public.invites  enable row level security;
 alter table public.profiles enable row level security;
 alter table public.checkins enable row level security;
@@ -290,16 +421,16 @@ begin
     execute format('drop policy if exists admin_escribe on public.%I', t);
     execute format('create policy admin_escribe on public.%I for all to authenticated using (public.is_admin()) with check (public.is_admin())', t);
   end loop;
-  -- Invitaciones pendientes y coordenadas del gym: sólo el admin.
-  foreach t in array array['invites', 'gym'] loop
+  -- Invitaciones pendientes, coordenadas del gym y lugar de cada marca: sólo el admin.
+  foreach t in array array['invites', 'gym', 'checkin_locations'] loop
     execute format('drop policy if exists admin_todo on public.%I', t);
     execute format('create policy admin_todo on public.%I for all to authenticated using (public.is_admin()) with check (public.is_admin())', t);
   end loop;
 end $$;
 
 -- Nada para quien no inició sesión; y nadie vacía tablas con TRUNCATE (no pasa por la RLS).
-revoke all on public.config, public.gym, public.invites, public.profiles, public.checkins, public.excuses, public.payments from anon;
-revoke truncate, references, trigger on public.config, public.gym, public.invites, public.profiles,
+revoke all on public.config, public.gym, public.checkin_locations, public.invites, public.profiles, public.checkins, public.excuses, public.payments from anon;
+revoke truncate, references, trigger on public.config, public.gym, public.checkin_locations, public.invites, public.profiles,
   public.checkins, public.excuses, public.payments from authenticated;
 -- La fila del gym tiene que existir siempre (config.gym_set depende de ella): nadie la borra.
 revoke delete on public.gym from authenticated;

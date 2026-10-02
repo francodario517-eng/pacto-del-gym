@@ -400,3 +400,10 @@ input[type="password"] {
 .gps-row .field { gap: 4px; }
 /* La pista de deslizar sólo hace falta donde el mes no entra entero */
 @media (min-width: 1000px) { .sec-h .hint.swipe { display: none; } }
+
+/* Marcas a revisar (hechas lejos de donde marca el grupo) */
+.cell.flag { background: var(--warn); color: var(--warn-ink); font-size: 15px; }
+.legend .cell.flag { font-size: 11px; }
+.note.warn-note, .sub.warn-note { color: var(--ink); background: color-mix(in srgb, var(--warn) 18%, transparent); border-radius: 8px; padding: 6px 10px; }
+.rank .right { justify-items: end; }
+.rank .right .pill + .pill { margin-top: 2px; }

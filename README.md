@@ -12,6 +12,18 @@ Registro de asistencias al gym del grupo. Cada día de entrenamiento sin marcar 
   - El usuario no se puede cambiar después del alta.
   - La ubicación exacta del gym sólo la ve el organizador.
 
+## Ubicación del gym: se aprende de las marcas
+
+- **Sin ubicación cargada,** se marca desde cualquier lado. Cada marca guarda desde dónde se hizo, en `checkin_locations`, que sólo ve el organizador.
+- **Cuándo se fija:** cuando 2 personas marcaron al menos 2 días cada una desde el mismo lugar (a menos de 25 m), con 3 días distintos en total. Se toma del grupo y no de cada persona, porque alguien que marca siempre desde su casa también sería "constante".
+- **Después,** según la distancia al gym:
+  - hasta 25 m, la marca queda **OK**;
+  - entre 25 y 200 m, queda **a revisar**: aparece con "!" a la vista de todos y el organizador la aprueba o la saca;
+  - a más de 200 m, no deja marcar.
+- **Las marcas anteriores** se vuelven a evaluar contra el gym aprendido.
+- **En Ajustes** se cambian los 25 m, los días y las personas. También están **Volver a aprender** y la carga a mano.
+- **El mensaje de rechazo no da la distancia,** para que nadie pueda calcular dónde está el gym.
+
 **Límite conocido:** la ubicación la manda el celular. Alguien con conocimientos técnicos y las coordenadas del gym podría falsearla. El sistema lo hace difícil, pero no imposible. Cada marca queda guardada con la hora y la distancia, a la vista del organizador.
 
 ## Puesta en marcha

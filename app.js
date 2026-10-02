@@ -40,7 +40,7 @@
     session: null, myId: null, isAdmin: false,
     status: 'loading',
     cfgRow: null, members: [],
-    att: new Map(), exc: new Map(), pay: new Map(),
+    att: new Map(), exc: new Map(), pay: new Map(), loc: new Map(), vst: new Map(),
     month: L.ymOf(today()),
     busy: new Set(),
     checking: null,          // null | 'locating' | 'sending'
@@ -55,10 +55,13 @@
   // Las coordenadas sólo le llegan al admin (tabla gym); los demás sólo saben si están cargadas.
   const gym = () => {
     const r = S.cfgRow || {}, g = S.gymRow || {};
-    return { name: r.gym_name || '', lat: g.lat, lng: g.lng, radius: r.gym_radius_m || 200, set: !!r.gym_set };
+    return { name: r.gym_name || '', lat: g.lat, lng: g.lng, radius: r.gym_radius_m || 200, set: !!r.gym_set,
+             source: g.source || null, learnedAt: g.learned_at || null,
+             verify: r.verify_m || 25, learnDays: r.learn_days || 3, learnPeople: r.learn_people || 2 };
   };
   const ctx = () => ({ att: S.att, exc: S.exc });
   const me = () => S.members.find(m => m.id === S.myId) || null;
+  const vstOf = (mid, d) => S.vst.get(mid + '~' + d) || null;
   const paidOf = (mid, ym) => { const p = S.pay.get(mid + '~' + ym); return p ? p.amount : 0; };
 
   /* ---------- Avisos ---------- */
@@ -120,7 +123,9 @@
     },
     gym: async () => {
       // Para quien no es admin la regla de la base devuelve vacío: no es un error.
-      const { data, error } = await sb.from('gym').select('lat,lng').eq('id', 1).maybeSingle();
+      let { data, error } = await sb.from('gym').select('lat,lng,source,learned_at').eq('id', 1).maybeSingle();
+      // Base todavía sin las columnas del aprendizaje (falta volver a correr el schema): se lee lo básico.
+      if (error && /source|learned_at|column/i.test(error.message || '')) ({ data, error } = await sb.from('gym').select('lat,lng').eq('id', 1).maybeSingle());
       if (error) throw error;
       S.gymRow = data;
     },
@@ -131,6 +136,20 @@
       S.isAdmin = !!(mine && mine.isAdmin);
     },
     checkins: async () => { S.att = new Map((await fetchAll('checkins', 'member,day,at,by,distance_m')).map(r => [r.member + '~' + r.day, r])); },
+    // Desde dónde se marcó cada día. La base sólo se la da al admin; al resto le llega vacío.
+    checkin_locations: async () => {
+      // Si la tabla todavía no existe (falta correr el schema nuevo), el tablero sigue andando sin ubicaciones.
+      try { S.loc = new Map((await fetchAll('checkin_locations', 'member,day,lat,lng,accuracy_m')).map(r => [r.member + '~' + r.day, r])); }
+      catch (e) { S.loc = new Map(); }
+    },
+    // Estado de cada marca (ok / revisar / aprendiendo / manual). Lo calcula la base sin mostrar coordenadas.
+    status: async () => {
+      try {
+        const { data, error } = await sb.rpc('checkin_status', { p_from: '2000-01-01', p_to: today() });
+        if (error) throw error;
+        S.vst = new Map((data || []).map(r => [r.member + '~' + r.day, r.status]));
+      } catch (e) { S.vst = new Map(); }   // función todavía no creada: el tablero sigue andando
+    },
     excuses: async () => { S.exc = new Map((await fetchAll('excuses', 'member,day,at,by,reason')).map(r => [r.member + '~' + r.day, r])); },
     payments: async () => { S.pay = new Map((await fetchAll('payments', 'member,month,amount,at,by')).map(r => [r.member + '~' + r.month, r])); }
   };
@@ -155,6 +174,8 @@
       .on('postgres_changes', { event: '*', schema: 'public' }, p => {
         if (!loaders[p.table]) return;
         pending.add(p.table);
+        if (p.table === 'checkins') pending.add('checkin_locations');
+        if (p.table === 'checkins' || p.table === 'config') pending.add('status');
         clearTimeout(pendTimer);
         pendTimer = setTimeout(() => { const t = [...pending]; pending.clear(); reload(t); }, 350);
       })
@@ -214,8 +235,8 @@
     S.checking = null;
     if (error) { render(); toast(explain(error), 7000); return; }
     S.stampNext = true;
-    await reload(['checkins']);
-    toast('Marcado. Buen entrenamiento.');
+    await reload(['checkins', 'checkin_locations', 'status', 'config', 'gym']);
+    toast(gym().set ? 'Marcado. Buen entrenamiento.' : 'Marcado. Se guardó desde dónde marcaste.');
   }
 
   /* ---------- Cambios del organizador sobre un día ---------- */
@@ -280,7 +301,7 @@
     const b = $('banner');
     let html = '';
     if (S.status === 'error') html = '<div class="banner"><b>No se pudo leer el reto.</b> Revisá la conexión y recargá la página.</div>';
-    else if (S.status === 'ready' && S.isAdmin && !gym().set) html = '<div class="banner"><b>Falta la ubicación del gym.</b> Sin ella nadie puede marcar. Cargala en Ajustes.</div>';
+    else if (S.status === 'ready' && S.isAdmin && !gym().set) { const g = gym(); html = '<div class="banner"><b>Aprendiendo dónde queda el gym.</b> Se fija sola cuando ' + g.learnPeople + ' personas marquen al menos 2 días cada una desde el mismo lugar (a menos de ' + g.verify + ' m), con ' + g.learnDays + ' días distintos en total. Mientras tanto se marca desde cualquier lado. También la podés cargar en Ajustes.</div>'; }
     b.innerHTML = html; b.hidden = !html;
   }
 
@@ -300,6 +321,9 @@
       html += '<button class="plate done' + (stamp ? ' stamp' : '') + '" disabled aria-label="Ya marcaste hoy">' +
         '<span class="small">Hoy</span><span class="big">Listo</span><span class="small">✓ ' + (rec && rec.at ? esc(hhmm(rec.at)) : 'marcado') + '</span></button>' +
         (rec && rec.by === S.myId ? '<button class="linkbtn" data-act="undo">Me equivoqué, desmarcar</button>' : '');
+      const vs = vstOf(m.id, t);
+      if (vs === 'revisar') html += '<div class="note warn-note">Tu marca quedó <b>a revisar</b>: la hiciste lejos de donde marca el grupo. El organizador la aprueba o la saca.</div>';
+      else if (vs === 'aprendiendo') html += '<div class="note">Todavía se está aprendiendo dónde queda el gym. Tu marca cuenta, y cuando se fije el gym se vuelve a revisar.</div>';
     } else if (st === 'excused') {
       html += '<button class="plate off" disabled><span class="small">Hoy</span><span class="big">Libre</span><span class="small">justificado</span></button>';
     } else if (S.checking) {
@@ -307,11 +331,11 @@
         (S.checking === 'locating' ? 'Buscando tu ubicación' : 'Verificando') + '</span></button>';
     } else {
       const counts = st === 'pending';
-      html += '<button class="plate' + (counts ? '' : ' off') + '" data-act="checkin"' + (g.set ? '' : ' disabled') + '>' +
+      html += '<button class="plate' + (counts ? '' : ' off') + '" data-act="checkin">' +
         (counts ? '<span class="small">Tocá al llegar</span><span class="big">Fui<br>hoy</span><span class="small">evitá ' + esc(L.gs(c.fine)) + '</span>'
                 : '<span class="small">Hoy no cuenta</span><span class="big">Fui<br>igual</span><span class="small">suma como extra</span>') + '</button>';
       html += '<div class="note">' + (g.set ? 'Se marca sólo estando en el gym' + (g.name ? ' (' + esc(g.name) + ')' : '') + '. Te va a pedir la ubicación.'
-                                          : 'Todavía no se cargó la ubicación del gym, así que no se puede marcar.') + '</div>';
+                                          : 'Te va a pedir la ubicación: se guarda desde dónde marcaste.') + '</div>';
     }
     html += '<div class="meta">' +
       '<span>Racha <b class="num">' + sk.cur + '</b></span>' +
@@ -352,6 +376,8 @@
       if (r.st.counted > 0 && r.st.miss === 0) pill = '<span class="pill ok">Invicto</span>';
       else if (r.st.fine > 0 && owed === 0) pill = '<span class="pill paid">Multa pagada</span>';
       else if (r.st.miss > 0) pill = '<span class="pill bad">' + r.st.miss + (r.st.miss === 1 ? ' falta' : ' faltas') + '</span>';
+      const rev = r.st.days.filter(x => (x.s === 'done' || x.s === 'extra') && vstOf(r.m.id, x.d) === 'revisar').length;
+      if (rev) pill += '<span class="pill warn">' + rev + ' a revisar</span>';
       const strip = r.st.days.map(x => '<i class="s-' + x.s + '"></i>').join('');
       return '<li class="' + (r.pos === 1 && r.st.counted > 0 ? 'lead' : '') + '">' +
         '<span class="pos num">' + r.pos + '</span>' + avatar(r.m) +
@@ -408,8 +434,7 @@
     const label = { done: 'fue', miss: 'faltó', excused: 'justificado', extra: 'fue en día libre', pending: 'falta marcar', off: 'no cuenta', future: 'todavía no' };
     for (const r of ranked) {
       html += '<tr><th class="nm" scope="row">' + esc(r.m.name) + '</th>' + r.st.days.map(x =>
-        '<td><button class="cell s-' + x.s + '" data-act="cell" data-m="' + esc(r.m.id) + '" data-d="' + x.d + '"' +
-        (x.s === 'future' ? ' disabled' : '') + ' aria-label="' + esc(r.m.name + ', ' + dayLong(x.d) + ': ' + label[x.s]) + '">' + (glyph[x.s] || '') + '</button></td>'
+        cellHtml(r, x, glyph, label)
       ).join('') + '</tr>';
     }
     const wrap = el.parentElement, keep = wrap.scrollLeft, first = !el.dataset.ym || el.dataset.ym !== ym;
@@ -419,6 +444,14 @@
     const col = $('todayCol');
     if (first && col) wrap.scrollLeft = Math.max(0, col.offsetLeft - wrap.clientWidth + 80);
     else wrap.scrollLeft = keep;
+  }
+
+  // Una celda del calendario. Una marca hecha lejos de donde marca el grupo lleva "!".
+  function cellHtml(r, x, glyph, label) {
+    const flag = (x.s === 'done' || x.s === 'extra') && vstOf(r.m.id, x.d) === 'revisar';
+    return '<td><button class="cell s-' + x.s + (flag ? ' flag' : '') + '" data-act="cell" data-m="' + esc(r.m.id) + '" data-d="' + x.d + '"' +
+      (x.s === 'future' ? ' disabled' : '') + ' aria-label="' + esc(r.m.name + ', ' + dayLong(x.d) + ': ' + label[x.s] + (flag ? ', a revisar' : '')) + '">' +
+      (flag ? '!' : (glyph[x.s] || '')) + '</button></td>';
   }
 
   function drawFines(c, ym, ranked) {
@@ -470,12 +503,29 @@
       who = '<div class="sub">Marcado ' + (byM && byM.id !== m.id ? 'por ' + esc(byM.name) + ' ' : '') + 'el ' + fmtDM.format(at) + ' a las ' + hhmm(rec.at) +
         (typeof rec.distance_m === 'number' ? ', a ' + Math.round(rec.distance_m) + ' m del gym' : '') + '</div>';
     }
+    // Lugar de la marca: sólo el admin lo tiene (la base no se lo da a nadie más).
+    const loc = S.isAdmin ? S.loc.get(key) : null;
+    if (loc) {
+      const q = loc.lat.toFixed(6) + ',' + loc.lng.toFixed(6);
+      who += '<div class="sub">Marcó desde ' + esc(q) + (typeof loc.accuracy_m === 'number' ? ' (±' + Math.round(loc.accuracy_m) + ' m)' : '') + '</div>' +
+        '<div class="acts"><a class="btn small" href="https://www.google.com/maps?q=' + q + '" target="_blank" rel="noopener">Ver en el mapa</a>' +
+        '<button class="btn small" data-act="gym-from-loc" data-lat="' + loc.lat + '" data-lng="' + loc.lng + '">Usar como ubicación del gym</button></div>';
+    }
+    const vs = S.att.has(key) ? vstOf(m.id, d) : null;
+    const vsTxt = {
+      ok: 'Verificada: marcó en el gym.',
+      revisar: 'A revisar: marcó lejos de donde marca el grupo.',
+      aprendiendo: 'Sin verificar todavía: el sistema está aprendiendo dónde queda el gym.',
+      manual: 'Cargada por el organizador.'
+    }[vs];
+    if (vsTxt) who += '<div class="sub' + (vs === 'revisar' ? ' warn-note' : '') + '">' + esc(vsTxt) + '</div>';
     const busy = S.busy.has(key) ? ' disabled' : '';
     let acts = '';
     if (S.isAdmin && d <= t) {
       const went = S.att.has(key), ex = S.exc.has(key);
       acts = '<div class="acts">' +
         (!went ? '<button class="btn primary" data-act="mark" data-k="went"' + busy + '>Fue</button>' : '') +
+        (vs === 'revisar' ? '<button class="btn primary" data-act="approve"' + busy + '>Aprobar</button>' : '') +
         (went || ex ? '<button class="btn danger" data-act="mark" data-k="miss"' + busy + '>Sacar la marca</button>' : '') +
         (!ex && st !== 'off' && st !== 'extra' ? '<button class="btn" data-act="mark" data-k="excused"' + busy + '>Justificar</button>' : '') +
         '</div>';
@@ -512,7 +562,14 @@
           '<label class="field rad"><small>Radio (m)</small><input type="number" id="gymRadius" min="30" max="2000" step="10" value="' + g.radius + '"></label></div>' +
         '<input type="text" id="gymPaste" placeholder="O pegá un link de Google Maps" aria-label="Link de Google Maps o coordenadas">' +
         '<small>También sirve pegar «latitud, longitud». Estando en el gym podés tocar «Usar mi ubicación».</small>' +
-        '<div class="acts"><button class="btn small" type="button" data-act="gym-here">Usar mi ubicación</button></div></div>' +
+        '<div class="acts"><button class="btn small" type="button" data-act="gym-here">Usar mi ubicación</button>' +
+          (g.set ? '<button class="btn small" type="button" data-act="relearn">Volver a aprender</button>' : '') + '</div>' +
+        '<small>' + (g.set ? (g.source === 'aprendida' ? 'Ubicación aprendida de las marcas del grupo.' : 'Ubicación cargada a mano.') : 'Todavía sin ubicación: se aprende de las marcas.') + '</small></div>' +
+      '<div class="field"><span>Verificación de las marcas</span><div class="gps-row">' +
+        '<label class="field"><small>OK a menos de (m)</small><input type="number" id="cfgVerify" min="5" max="500" step="5" value="' + g.verify + '"></label>' +
+        '<label class="field"><small>Días para aprender</small><input type="number" id="cfgLearnDays" min="1" max="30" value="' + g.learnDays + '"></label>' +
+        '<label class="field rad"><small>Personas</small><input type="number" id="cfgLearnPeople" min="1" max="20" value="' + g.learnPeople + '"></label></div>' +
+        '<small>Más lejos que eso del gym, la marca queda «a revisar». Adentro de un local el GPS puede errar 20 o 30 m: si marcas reales quedan a revisar, subilo a 40 o 50.</small></div>' +
       '<div class="foot"><button class="btn primary" data-act="save-cfg">Guardar ajustes</button></div>' +
       '<div class="field"><span>Feriados y días que no cuentan</span><div class="hols">' +
         (c.holidays.length ? c.holidays.slice().sort().map(h => '<span class="pill">' + Number(h.slice(8)) + '/' + Number(h.slice(5, 7)) + '/' + h.slice(0, 4) +
@@ -604,6 +661,30 @@
     else if (act === 'account') openAccount();
     else if (act === 'close-acct') closeDlg($('acctDlg'));
     else if (act === 'logout') { await sb.auth.signOut(); location.reload(); }
+    else if (act === 'approve') {
+      if (!dayCtx) return;
+      b.disabled = true;
+      if (await run(sb.from('checkins').update({ approved: true }).eq('member', dayCtx.mid).eq('day', dayCtx.d), 'Marca aprobada.')) await reload(['checkins', 'status']);
+      else release(b);
+    }
+    else if (act === 'relearn') {
+      if (b.dataset.confirm !== '1') { b.dataset.confirm = '1'; b.textContent = '¿Borrar y aprender de nuevo?'; return; }
+      b.disabled = true;
+      const ok = await run(sb.from('gym').update({ lat: null, lng: null, source: null, learned_at: null }).eq('id', 1));
+      if (ok) {
+        const { data, error } = await sb.rpc('admin_learn_gym');
+        if (error) toast(explain(error));
+        else toast(data ? 'Listo: se volvió a aprender la ubicación con las marcas que ya hay.' : 'Ubicación borrada. Se va a aprender con las próximas marcas.', 6000);
+        await reload(['config', 'gym', 'status']);
+      } else release(b, 'Volver a aprender');
+    }
+    else if (act === 'gym-from-loc') {
+      const lat = Number(b.dataset.lat), lng = Number(b.dataset.lng);
+      if (b.dataset.confirm !== '1') { b.dataset.confirm = '1'; b.textContent = '¿Seguro? Desde ahí se mide el radio'; return; }
+      b.disabled = true;
+      if (await run(sb.from('gym').upsert({ id: 1, lat: lat, lng: lng, source: 'manual', learned_at: null }), 'Listo: esa es la ubicación del gym. Desde ahora se marca sólo dentro del radio.')) await reload(['config', 'gym', 'status']);
+      else release(b, 'Usar como ubicación del gym');
+    }
     else if (act === 'gym-here') {
       b.disabled = true; b.textContent = 'Buscando…';
       try {
@@ -631,14 +712,22 @@
       if (!weekdays.length) return toast('Marcá al menos un día de entrenamiento.');
       if ((lat === null) !== (lng === null) || (lat !== null && (!isFinite(lat) || !isFinite(lng) || Math.abs(lat) > 90 || Math.abs(lng) > 180))) return toast('Revisá la latitud y la longitud del gym.');
       if (!(radius >= 30 && radius <= 2000)) return toast('El radio tiene que estar entre 30 y 2.000 metros.');
+      const verify = Math.round(Number($('cfgVerify').value)), ldays = Math.round(Number($('cfgLearnDays').value)), lpeople = Math.round(Number($('cfgLearnPeople').value));
+      if (!(verify >= 5 && verify <= 500)) return toast('La distancia para dar OK tiene que estar entre 5 y 500 m.');
+      if (!(ldays >= 1 && ldays <= 30) || !(lpeople >= 1 && lpeople <= 20)) return toast('Revisá los días (1 a 30) y las personas (1 a 20) para aprender.');
+      // Todo se lee antes de guardar: después del primer guardado la pantalla se puede redibujar.
+      const title = $('cfgTitle').value.trim().slice(0, 60) || 'Pacto del Gym', gymName = $('gymName').value.trim().slice(0, 60) || null;
       b.disabled = true;
-      let ok = await run(sb.from('gym').upsert({ id: 1, lat: lat, lng: lng }));
+      const g0 = gym();
+      const moved = lat !== (typeof g0.lat === 'number' ? g0.lat : null) || lng !== (typeof g0.lng === 'number' ? g0.lng : null);
+      let ok = moved ? await run(sb.from('gym').upsert({ id: 1, lat: lat, lng: lng, source: lat === null ? null : 'manual', learned_at: null })) : true;
       if (ok) ok = await run(sb.from('config').update({
-        title: $('cfgTitle').value.trim().slice(0, 60) || 'Pacto del Gym', fine: Math.round(fine), weekdays: weekdays, start_date: start,
-        gym_name: $('gymName').value.trim().slice(0, 60) || null, gym_radius_m: radius, updated_at: new Date().toISOString()
+        verify_m: verify, learn_days: ldays, learn_people: lpeople,
+        title: title, fine: Math.round(fine), weekdays: weekdays, start_date: start,
+        gym_name: gymName, gym_radius_m: radius, updated_at: new Date().toISOString()
       }).eq('id', 1), 'Ajustes guardados.');
       b.disabled = false;
-      if (ok) await reload(['config', 'gym']);
+      if (ok) await reload(['config', 'gym', 'status']);
     }
     else if (act === 'add-hol' || act === 'rm-hol') {
       let hol = c.holidays.slice();
